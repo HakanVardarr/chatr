@@ -1,0 +1,3 @@
+[workspace]
+members = ["chatr-client", "chatr-server"]
+resolver = "3"
