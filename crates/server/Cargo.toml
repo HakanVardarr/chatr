@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 oneshot = "0.1.11"
+socket2 = "0.6.0"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }

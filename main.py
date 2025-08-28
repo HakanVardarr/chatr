@@ -7,7 +7,6 @@ SERVER_PORT = 3030
 
 
 def listen_for_messages(sock: socket.socket):
-
     while True:
         try:
             data = sock.recv(1024)

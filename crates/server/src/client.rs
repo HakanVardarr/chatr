@@ -3,7 +3,7 @@ use crate::MAX_USER_SIZE;
 use super::command::Command;
 use super::error::ProtocolError;
 use super::response::Response;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpStream, tcp::OwnedWriteHalf},
@@ -189,6 +189,14 @@ async fn handle_read_line(
 }
 
 pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> anyhow::Result<()> {
+    let socket_ref = socket2::SockRef::from(&stream);
+    let mut ka = socket2::TcpKeepalive::new();
+
+    ka = ka.with_time(Duration::from_secs(20));
+    ka = ka.with_interval(Duration::from_secs(20));
+
+    socket_ref.set_tcp_keepalive(&ka)?;
+
     let (reader_half, mut w) = stream.into_split();
     let mut reader = BufReader::new(reader_half);
 
