@@ -2,7 +2,7 @@ import socket
 import sys
 import threading
 
-SERVER_HOST = "127.0.0.1"
+SERVER_HOST = "176.96.131.170"
 SERVER_PORT = 3030
 
 

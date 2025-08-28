@@ -54,7 +54,7 @@ async fn handle_read_line(
     w: &mut OwnedWriteHalf,
     private_sender: mpsc::Sender<Response>,
 ) -> anyhow::Result<()> {
-    if bytes_read == 0 && state.is_validated() {
+    if bytes_read == 0 {
         let command = Command::Quit {
             username: state.username.clone(),
         };
@@ -142,6 +142,7 @@ async fn handle_read_line(
                         })
                         .await?;
                     w.shutdown().await?;
+                    return Ok(());
                 }
             }
             "PRIVATE" => {
