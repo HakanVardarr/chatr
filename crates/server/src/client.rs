@@ -83,6 +83,7 @@ async fn handle_read_line(
                 if !state.is_username_valid() {
                     let resp = Response::Error(ProtocolError::InvalidUsername);
                     w.write_all(format!("{resp}\n").as_bytes()).await?;
+                    return Ok(());
                 }
 
                 let (resp_tx, resp_rx) = oneshot::channel();
@@ -213,10 +214,6 @@ pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> 
         let mut line = String::new();
 
         tokio::select! {
-            // bytes_read = reader.read_line(&mut line) => {
-            //     let n = bytes_read?;
-            //     handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;
-            // }
             bytes_read = reader.read_line(&mut line) => {
                 match bytes_read {
                     Ok(0) => {
