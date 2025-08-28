@@ -19,6 +19,7 @@ HELLO | <username>
 **Possible responses:**
 ```
 WELCOME | <username> | <user_count>
+OK      | SUCCESS
 ERROR   | 03 | Invalid username.
 ERROR   | 04 | You are already validated.
 ERROR   | 05 | User already exists.
@@ -38,6 +39,7 @@ MESSAGE | <text>
 **Broadcast response to others:**
 ```
 CHAT | <username> | <text>
+OK   | SUCCESS
 ```
 
 ---
@@ -109,6 +111,15 @@ LEFT | <username>
 
 ---
 
+### SUCCESS
+Indicates that a client command has been processed successfully.
+
+```
+OK | SUCCESS
+```
+
+---
+
 ## 3. Example Session
 
 ```
@@ -117,6 +128,7 @@ SERVER → CLIENT:  WELCOME | Alice | 1
 
 CLIENT → SERVER:  MESSAGE | Hello everyone!
 SERVER → ALL:     CHAT | Alice | Hello everyone!
+SERVER → Alice:   OK | Success
 
 CLIENT → SERVER:  QUIT |
 SERVER → ALL:     LEFT | Alice
@@ -135,6 +147,7 @@ PRIVATE | <to_username> | <text>
 **Response to the recipient:**
 ```
 PRIVATE | <from_username> | <text>
+SUCCESS
 ```
 
 ---

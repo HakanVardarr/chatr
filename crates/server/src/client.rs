@@ -1,11 +1,12 @@
 use crate::MAX_USER_SIZE;
 
 use super::command::Command;
+use super::error::ProtocolError;
 use super::response::Response;
 use std::net::SocketAddr;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
+    net::{TcpStream, tcp::OwnedWriteHalf},
     sync::mpsc,
 };
 
@@ -16,116 +17,194 @@ pub struct User {
     pub private_sender: mpsc::Sender<Response>,
 }
 
-fn is_username_valid(username: &str) -> bool {
-    !username.is_empty() && username.chars().all(|c| c.is_ascii_alphabetic())
+#[derive(Debug)]
+pub struct ClientState {
+    pub validated: bool,
+    pub username: String,
+}
+
+impl ClientState {
+    fn is_validated(&self) -> bool {
+        self.validated
+    }
+
+    async fn write_if_not_validated(&self, w: &mut OwnedWriteHalf) -> anyhow::Result<()> {
+        if !self.validated {
+            let resp = Response::Error(ProtocolError::NotValidated);
+            w.write_all(format!("{resp}\n").as_bytes()).await?;
+        }
+
+        Ok(())
+    }
+
+    fn validate(&mut self) {
+        self.validated = true;
+    }
+
+    fn is_username_valid(&self) -> bool {
+        !self.username.is_empty() && self.username.chars().all(|c| c.is_ascii_alphabetic())
+    }
+}
+
+async fn handle_read_line(
+    bytes_read: usize,
+    line: &mut String,
+    state: &mut ClientState,
+    sender: &mpsc::Sender<Command>,
+    w: &mut OwnedWriteHalf,
+    private_sender: mpsc::Sender<Response>,
+) -> anyhow::Result<()> {
+    if bytes_read == 0 && state.is_validated() {
+        let command = Command::Quit {
+            username: state.username.clone(),
+        };
+        sender.send(command).await?;
+        return Ok(());
+    }
+
+    let input = line.trim().to_string();
+    line.clear();
+
+    if let Some((command, body)) = input.split_once("|") {
+        let command = command.trim();
+        let body = body.trim();
+
+        match command {
+            "HELLO" => {
+                if state.is_validated() {
+                    let resp = Response::Error(ProtocolError::AlreadyValidated);
+                    w.write_all(format!("{resp}\n").as_bytes()).await?;
+                    return Ok(());
+                }
+
+                state.username = body.into();
+                if !state.is_username_valid() {
+                    let resp = Response::Error(ProtocolError::InvalidUsername);
+                    w.write_all(format!("{resp}\n").as_bytes()).await?;
+                }
+
+                let (resp_tx, resp_rx) = oneshot::channel();
+
+                sender
+                    .send(Command::Hello {
+                        username: body.into(),
+                        addr: w.peer_addr()?,
+                        respond_to: resp_tx,
+                        private_sender,
+                    })
+                    .await?;
+
+                let response = resp_rx.await?;
+                match &response {
+                    Response::Welcome {
+                        username: _,
+                        user_count: _,
+                    } => {
+                        state.validate();
+                        w.write_all(format!("{response}\n").as_bytes()).await?;
+                    }
+                    Response::Error(_) => {
+                        w.write_all(format!("{response}\n").as_bytes()).await?;
+                    }
+                    _ => {}
+                }
+            }
+            "MESSAGE" => {
+                state.write_if_not_validated(w).await?;
+                if state.is_validated() {
+                    let (resp_tx, resp_rx) = oneshot::channel();
+
+                    sender
+                        .send(Command::Message {
+                            from: state.username.clone(),
+                            body: body.into(),
+                            respond_to: resp_tx,
+                        })
+                        .await?;
+
+                    let response = resp_rx.await?;
+                    match &response {
+                        Response::Success => {
+                            w.write_all(format!("{response}\n").as_bytes()).await?;
+                        }
+                        Response::Error(_) => {
+                            w.write_all(format!("{response}\n").as_bytes()).await?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "QUIT" => {
+                if state.is_validated() {
+                    sender
+                        .send(Command::Quit {
+                            username: state.username.clone(),
+                        })
+                        .await?;
+                    w.shutdown().await?;
+                }
+            }
+            "PRIVATE" => {
+                state.write_if_not_validated(w).await?;
+                if let Some((to, body)) = body.split_once("|")
+                    && state.is_validated()
+                {
+                    let to = to.trim();
+                    let body = body.trim();
+
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let _ = sender
+                        .send(Command::PrivateMessage {
+                            from: state.username.clone(),
+                            to: to.into(),
+                            body: body.into(),
+                            respond_to: resp_tx,
+                        })
+                        .await;
+
+                    let response = resp_rx.await?;
+                    match &response {
+                        Response::Success => {
+                            w.write_all(format!("{response}\n").as_bytes()).await?;
+                        }
+                        Response::Error(_) => {
+                            w.write_all(format!("{response}\n").as_bytes()).await?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                let resp = Response::Error(ProtocolError::InvalidCommand);
+                w.write_all(format!("{resp} {command}\n").as_bytes())
+                    .await?;
+            }
+        }
+    } else {
+        let resp = Response::Error(ProtocolError::InvalidFormat);
+        w.write_all(format!("{resp}\n").as_bytes()).await?;
+    }
+
+    Ok(())
 }
 
 pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> anyhow::Result<()> {
     let (reader_half, mut w) = stream.into_split();
-
     let mut reader = BufReader::new(reader_half);
 
-    let mut validated = false;
-
-    let mut _username = String::new();
+    let mut state = ClientState {
+        validated: false,
+        username: String::new(),
+    };
     let (private_tx, mut private_rx) = mpsc::channel(MAX_USER_SIZE);
 
     loop {
         let mut line = String::new();
 
         tokio::select! {
-            read_res = reader.read_line(&mut line) => {
-                let n = read_res?;
-                if n == 0 {
-                    if validated {
-                        let _ = sender.send(Command::Quit { username: _username.clone() }).await;
-                    }
-                    return Ok(());
-                }
-                let input = line.trim().to_string();
-                line.clear();
-                if let Some((command, payload)) = input.split_once("|") {
-                    let command = command.trim();
-                    let payload = payload.trim();
-
-                    match command {
-                        "HELLO" => {
-                            if validated {
-                                w.write_all(b"ERROR | 04 | You are already validated.\n").await?;
-                            } else if is_username_valid(payload) {
-                                let (resp_tx, resp_rx) = oneshot::channel();
-
-                                sender
-                                .send(Command::Hello {
-                                        username: payload.into(),
-                                        addr: w.peer_addr().unwrap(),
-                                        respond_to: resp_tx,
-                                        private_sender: private_tx.clone(),
-                                }).await?;
-
-                                match resp_rx.await {
-                                    Ok(Response::Welcome { username, user_count }) => {
-                                        validated = true;
-                                        let msg = format!("WELCOME | {username} | {user_count}\n");
-                                        w.write_all(msg.as_bytes()).await?;
-                                        _username = username
-                                    },
-                                    Ok(Response::Error { error_code, error_message }) => {
-                                        let msg = format!("ERROR | {error_code:02} | {error_message}\n");
-                                        w.write_all(msg.as_bytes()).await?;
-                                    },
-                                    _  => {},
-                                }
-                            } else {
-                                w.write_all(b"ERROR | 03 | Invalid username.\n").await?;
-                            }
-                        },
-                        "MESSAGE" => {
-                            if !validated {
-                                let msg = "ERROR | 06 | Please validate yourself.\n";
-                                w.write_all(msg.as_bytes()).await?;
-                            }
-
-                            let _ = sender.send(Command::Message { from: _username.clone(), body: payload.into() }).await;
-                        }
-                        "QUIT" => {
-                            if validated {
-                                let _ = sender.send(Command::Quit { username: _username.clone() }).await;
-                                return Ok(());
-                            } else {
-                                let msg = "ERROR | 06 | Please validate yourself.\n";
-                                w.write_all(msg.as_bytes()).await?;
-                            }
-                        }
-                        "PRIVATE" => {
-                            if let Some((to, body)) = payload.split_once("|") && validated {
-                                let to = to.trim();
-                                let body = body.trim();
-
-                                let (resp_tx, resp_rx) = oneshot::channel();
-
-                                let _ = sender.send(Command::PrivateMessage { from: _username.clone(), to: to.into(), body: body.into(), respond_to: resp_tx}).await;
-
-                                match resp_rx.await {
-                                    Ok(Response::Success) => {},
-                                    Ok(Response::Error { error_code, error_message }) => {
-                                        let msg = format!("ERROR | {error_code:02} | {error_message}\n");
-                                        w.write_all(msg.as_bytes()).await?;
-                                    },
-                                    _  => {},
-                                }
-                            } else {
-                                w.write_all(b"ERROR | 01 | Please follow protocol.\n").await?;
-                            }
-                        }
-                        _ => {
-                            let msg = format!("ERROR | 02 | Invalid command '{}'.\n", command);
-                            w.write_all(msg.as_bytes()).await?;
-                        },
-                    }
-                } else {
-                    w.write_all(b"ERROR | 01 | Please follow protocol.\n").await?;
-                }
+            bytes_read = reader.read_line(&mut line) => {
+                let n = bytes_read?;
+                handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;
             }
 
             read = private_rx.recv() => {
@@ -139,8 +218,12 @@ pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> 
                     let msg = format!("{} | {from} | {body}\n", c_type);
                     w.write_all(msg.as_bytes()).await?;
                 } else if let Some(Response::Quit {username}) = read {
-                    if validated && username == _username { continue; }
+                    if state.is_validated() && username == state.username { continue; }
                     let out = format!("LEFT | {}\n", username);
+                    w.write_all(out.as_bytes()).await?;
+                } else if let Some(Response::Join {username}) = read {
+                    if state.is_validated() && username == state.username { continue; }
+                    let out = format!("JOIN | {}\n", username);
                     w.write_all(out.as_bytes()).await?;
                 }
             }

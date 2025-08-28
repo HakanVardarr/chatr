@@ -1,5 +1,6 @@
 use super::client::User;
 use super::command::Command;
+use super::error::ProtocolError;
 use super::response::Response;
 use tokio::sync::mpsc;
 
@@ -15,12 +16,7 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                 private_sender,
             } => {
                 if connections.iter().any(|conn: &User| conn.name == username) {
-                    respond_to
-                        .send(Response::Error {
-                            error_code: 5,
-                            error_message: "User already exists.".into(),
-                        })
-                        .unwrap();
+                    let _ = respond_to.send(Response::Error(ProtocolError::UserExists));
                     continue;
                 }
 
@@ -30,14 +26,27 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                     private_sender,
                 });
 
-                respond_to
-                    .send(Response::Welcome {
-                        username,
-                        user_count: connections.len() as u32,
-                    })
-                    .unwrap();
+                let _ = respond_to.send(Response::Welcome {
+                    username: username.clone(),
+                    user_count: connections.len() as u32,
+                });
+
+                for connection in &connections {
+                    if connection.name != username.clone() {
+                        let _ = connection
+                            .private_sender
+                            .send(Response::Join {
+                                username: username.clone(),
+                            })
+                            .await;
+                    }
+                }
             }
-            Command::Message { from, body } => {
+            Command::Message {
+                from,
+                body,
+                respond_to,
+            } => {
                 for connection in &connections {
                     if connection.name == from {
                         continue;
@@ -52,11 +61,16 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                         })
                         .await;
                 }
+                let _ = respond_to.send(Response::Success);
             }
             Command::Quit { username } => {
                 if let Some(pos) = connections.iter().position(|user| user.name == username) {
                     connections.remove(pos);
                     for connection in &connections {
+                        if connection.name == username {
+                            continue;
+                        }
+
                         let _ = connection
                             .private_sender
                             .send(Response::Quit {
@@ -72,7 +86,9 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                 body,
                 respond_to,
             } => {
-                if let Some(user) = connections.iter().find(|user| user.name == to) {
+                if from == to {
+                    let _ = respond_to.send(Response::Error(ProtocolError::MessageYourself));
+                } else if let Some(user) = connections.iter().find(|user| user.name == to) {
                     let _ = user
                         .private_sender
                         .send(Response::Chat {
@@ -83,16 +99,8 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                         .await;
 
                     let _ = respond_to.send(Response::Success);
-                } else if from == to {
-                    let _ = respond_to.send(Response::Error {
-                        error_code: 7,
-                        error_message: "You cannot send a private message to yourself.".into(),
-                    });
                 } else {
-                    let _ = respond_to.send(Response::Error {
-                        error_code: 8,
-                        error_message: "User does not exists.".into(),
-                    });
+                    let _ = respond_to.send(Response::Error(ProtocolError::UserDoesntExists));
                 }
             }
         }

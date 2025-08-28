@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 mod client;
 mod command;
+mod error;
 mod response;
 mod server;
 

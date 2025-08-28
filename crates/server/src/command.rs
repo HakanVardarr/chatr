@@ -13,6 +13,7 @@ pub enum Command {
     Message {
         from: String,
         body: String,
+        respond_to: oneshot::Sender<Response>,
     },
     Quit {
         username: String,

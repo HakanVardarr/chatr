@@ -1,10 +1,10 @@
+use crate::error::ProtocolError;
+use core::fmt;
+
 #[derive(Clone, Debug)]
 pub enum Response {
     Success,
-    Error {
-        error_code: u32,
-        error_message: String,
-    },
+    Error(ProtocolError),
     Welcome {
         username: String,
         user_count: u32,
@@ -17,4 +17,35 @@ pub enum Response {
     Quit {
         username: String,
     },
+    Join {
+        username: String,
+    },
+}
+
+impl fmt::Display for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Response::Error(err) => write!(f, "ERROR | {:02} | {}", err.code(), err.message()),
+            Response::Welcome {
+                username,
+                user_count,
+            } => {
+                write!(f, "WELCOME | {username} | {user_count}")
+            }
+            Response::Chat {
+                from,
+                body,
+                is_private,
+            } => {
+                if *is_private {
+                    write!(f, "PRIVATE | {from} | {body}")
+                } else {
+                    write!(f, "CHAT | {from} | {body}")
+                }
+            }
+            Response::Quit { username } => write!(f, "LEFT | {username}"),
+            Response::Success => write!(f, "OK | Success"),
+            Response::Join { username } => write!(f, "JOIN | {username}"),
+        }
+    }
 }
