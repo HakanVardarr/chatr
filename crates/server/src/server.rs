@@ -13,7 +13,6 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
         match command {
             Command::Hello {
                 username,
-                addr,
                 respond_to,
                 private_sender,
             } => {
@@ -26,7 +25,6 @@ pub async fn run_server(mut rx: mpsc::Receiver<Command>) {
                     username.clone(),
                     User {
                         name: username.clone(),
-                        _addr: addr,
                         private_sender,
                     },
                 );

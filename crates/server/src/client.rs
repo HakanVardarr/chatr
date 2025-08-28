@@ -3,17 +3,14 @@ use crate::MAX_USER_SIZE;
 use super::command::Command;
 use super::error::ProtocolError;
 use super::response::Response;
-use std::{net::SocketAddr, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpStream, tcp::OwnedWriteHalf},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
 
 #[derive(Debug)]
 pub struct User {
     pub name: String,
-    pub _addr: SocketAddr,
     pub private_sender: mpsc::Sender<Response>,
 }
 
@@ -28,7 +25,10 @@ impl ClientState {
         self.validated
     }
 
-    async fn write_if_not_validated(&self, w: &mut OwnedWriteHalf) -> anyhow::Result<()> {
+    async fn write_if_not_validated<W>(&self, w: &mut W) -> anyhow::Result<()>
+    where
+        W: AsyncWriteExt + Unpin,
+    {
         if !self.validated {
             let resp = Response::Error(ProtocolError::NotValidated);
             w.write_all(format!("{resp}\n").as_bytes()).await?;
@@ -46,14 +46,17 @@ impl ClientState {
     }
 }
 
-async fn handle_read_line(
+async fn handle_read_line<W>(
     bytes_read: usize,
     line: &mut String,
     state: &mut ClientState,
     sender: &mpsc::Sender<Command>,
-    w: &mut OwnedWriteHalf,
+    w: &mut W,
     private_sender: mpsc::Sender<Response>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
     if bytes_read == 0 {
         if state.is_validated() {
             let command = Command::Quit {
@@ -91,7 +94,6 @@ async fn handle_read_line(
                 sender
                     .send(Command::Hello {
                         username: body.into(),
-                        addr: w.peer_addr()?,
                         respond_to: resp_tx,
                         private_sender,
                     })
@@ -192,16 +194,11 @@ async fn handle_read_line(
     Ok(())
 }
 
-pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> anyhow::Result<()> {
-    let socket_ref = socket2::SockRef::from(&stream);
-    let mut ka = socket2::TcpKeepalive::new();
-
-    ka = ka.with_time(Duration::from_secs(20));
-    ka = ka.with_interval(Duration::from_secs(20));
-
-    socket_ref.set_tcp_keepalive(&ka)?;
-
-    let (reader_half, mut w) = stream.into_split();
+pub async fn handle_client<S>(stream: S, sender: mpsc::Sender<Command>) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let (reader_half, mut w) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader_half);
 
     let mut state = ClientState {
@@ -210,9 +207,8 @@ pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> 
     };
     let (private_tx, mut private_rx) = mpsc::channel(MAX_USER_SIZE);
 
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
-
         tokio::select! {
             bytes_read = reader.read_line(&mut line) => {
                 match bytes_read {
@@ -223,11 +219,10 @@ pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> 
                         return Ok(());
                     }
                     Ok(n) => {handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;}
-                    Err(e) => {
+                    Err(_) => {
                         if state.is_validated() {
                             let _ = sender.send(Command::Quit { username: state.username.clone() }).await;
                         }
-                        eprintln!("socket error from {}: {e}", state.username);
                         return Ok(());
                     }
                 }

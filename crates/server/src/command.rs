@@ -1,12 +1,10 @@
 use super::response::Response;
-use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
 pub enum Command {
     Hello {
         username: String,
-        addr: SocketAddr,
         respond_to: oneshot::Sender<Response>,
         private_sender: mpsc::Sender<Response>,
     },
