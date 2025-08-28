@@ -55,10 +55,12 @@ async fn handle_read_line(
     private_sender: mpsc::Sender<Response>,
 ) -> anyhow::Result<()> {
     if bytes_read == 0 {
-        let command = Command::Quit {
-            username: state.username.clone(),
-        };
-        sender.send(command).await?;
+        if state.is_validated() {
+            let command = Command::Quit {
+                username: state.username.clone(),
+            };
+            let _ = sender.send(command).await;
+        }
         return Ok(());
     }
 
@@ -211,9 +213,27 @@ pub async fn handle_client(stream: TcpStream, sender: mpsc::Sender<Command>) -> 
         let mut line = String::new();
 
         tokio::select! {
+            // bytes_read = reader.read_line(&mut line) => {
+            //     let n = bytes_read?;
+            //     handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;
+            // }
             bytes_read = reader.read_line(&mut line) => {
-                let n = bytes_read?;
-                handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;
+                match bytes_read {
+                    Ok(0) => {
+                        if state.is_validated() {
+                            let _ = sender.send(Command::Quit { username: state.username.clone() }).await;
+                        }
+                        return Ok(());
+                    }
+                    Ok(n) => {handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;}
+                    Err(e) => {
+                        if state.is_validated() {
+                            let _ = sender.send(Command::Quit { username: state.username.clone() }).await;
+                        }
+                        eprintln!("socket error from {}: {e}", state.username);
+                        return Ok(());
+                    }
+                }
             }
 
             read = private_rx.recv() => {
