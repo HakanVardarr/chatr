@@ -1,8 +1,9 @@
-use crate::MAX_USER_SIZE;
+use crate::protocol::request::Request;
 
-use super::command::Command;
-use super::error::ProtocolError;
-use super::response::Response;
+use super::MAX_USER_SIZE;
+use super::protocol::command::Command;
+use super::protocol::error::ProtocolError;
+use super::protocol::response::Response;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     sync::mpsc,
@@ -10,6 +11,7 @@ use tokio::{
 
 #[derive(Debug)]
 pub struct User {
+    #[allow(dead_code)]
     pub name: String,
     pub private_sender: mpsc::Sender<Response>,
 }
@@ -50,7 +52,7 @@ async fn handle_read_line<W>(
     bytes_read: usize,
     line: &mut String,
     state: &mut ClientState,
-    sender: &mpsc::Sender<Command>,
+    sender: &mpsc::Sender<Request>,
     w: &mut W,
     private_sender: mpsc::Sender<Response>,
 ) -> anyhow::Result<()>
@@ -59,10 +61,11 @@ where
 {
     if bytes_read == 0 {
         if state.is_validated() {
-            let command = Command::Quit {
+            let (req, _) = Request::new(Command::Quit {
                 username: state.username.clone(),
-            };
-            let _ = sender.send(command).await;
+            });
+
+            let _ = sender.send(req).await;
         }
         return Ok(());
     }
@@ -89,17 +92,14 @@ where
                     return Ok(());
                 }
 
-                let (resp_tx, resp_rx) = oneshot::channel();
+                let (req, rx) = Request::new(Command::Hello {
+                    username: body.into(),
+                    private_sender,
+                });
 
-                sender
-                    .send(Command::Hello {
-                        username: body.into(),
-                        respond_to: resp_tx,
-                        private_sender,
-                    })
-                    .await?;
+                sender.send(req).await?;
 
-                let response = resp_rx.await?;
+                let response = rx.await?;
                 match &response {
                     Response::Welcome {
                         username: _,
@@ -117,17 +117,14 @@ where
             "MESSAGE" => {
                 state.write_if_not_validated(w).await?;
                 if state.is_validated() {
-                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let (req, rx) = Request::new(Command::Message {
+                        from: state.username.clone(),
+                        body: body.into(),
+                    });
 
-                    sender
-                        .send(Command::Message {
-                            from: state.username.clone(),
-                            body: body.into(),
-                            respond_to: resp_tx,
-                        })
-                        .await?;
+                    sender.send(req).await?;
 
-                    let response = resp_rx.await?;
+                    let response = rx.await?;
                     match &response {
                         Response::Success => {
                             w.write_all(format!("{response}\n").as_bytes()).await?;
@@ -141,11 +138,11 @@ where
             }
             "QUIT" => {
                 if state.is_validated() {
-                    sender
-                        .send(Command::Quit {
-                            username: state.username.clone(),
-                        })
-                        .await?;
+                    let (req, _) = Request::new(Command::Quit {
+                        username: state.username.clone(),
+                    });
+
+                    sender.send(req).await?;
                     w.shutdown().await?;
                     return Ok(());
                 }
@@ -158,17 +155,14 @@ where
                     let to = to.trim();
                     let body = body.trim();
 
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = sender
-                        .send(Command::PrivateMessage {
-                            from: state.username.clone(),
-                            to: to.into(),
-                            body: body.into(),
-                            respond_to: resp_tx,
-                        })
-                        .await;
+                    let (req, rx) = Request::new(Command::PrivateMessage {
+                        from: state.username.clone(),
+                        to: to.into(),
+                        body: body.into(),
+                    });
+                    let _ = sender.send(req).await;
 
-                    let response = resp_rx.await?;
+                    let response = rx.await?;
                     match &response {
                         Response::Success => {
                             w.write_all(format!("{response}\n").as_bytes()).await?;
@@ -194,7 +188,7 @@ where
     Ok(())
 }
 
-pub async fn handle_client<S>(stream: S, sender: mpsc::Sender<Command>) -> anyhow::Result<()>
+pub async fn handle_client<S>(stream: S, sender: mpsc::Sender<Request>) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWriteExt + Unpin + Send + 'static,
 {
@@ -214,14 +208,22 @@ where
                 match bytes_read {
                     Ok(0) => {
                         if state.is_validated() {
-                            let _ = sender.send(Command::Quit { username: state.username.clone() }).await;
+                            let (req, _) = Request::new(Command::Quit {
+                                username: state.username.clone(),
+                            });
+
+                            let _ = sender.send(req).await;
                         }
                         return Ok(());
                     }
                     Ok(n) => {handle_read_line(n, &mut line, &mut state, &sender, &mut w, private_tx.clone()).await?;}
                     Err(_) => {
                         if state.is_validated() {
-                            let _ = sender.send(Command::Quit { username: state.username.clone() }).await;
+                            let (req, _) = Request::new(Command::Quit {
+                                username: state.username.clone(),
+                            });
+
+                            let _ = sender.send(req).await;
                         }
                         return Ok(());
                     }

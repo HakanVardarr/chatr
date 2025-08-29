@@ -1,4 +1,4 @@
-use crate::error::ProtocolError;
+use super::error::ProtocolError;
 use core::fmt;
 
 #[derive(Clone, Debug)]

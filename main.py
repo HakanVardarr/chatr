@@ -1,4 +1,5 @@
 import socket
+import ssl
 import sys
 import threading
 
@@ -6,13 +7,16 @@ SERVER_HOST = "176.96.131.170"
 SERVER_PORT = 3030
 
 
-def listen_for_messages(sock: socket.socket):
+SERVER_NAME = "screenshotpaylas.com"
+
+
+def listen_for_messages(ssl_sock: ssl.SSLSocket):
     while True:
         try:
-            data = sock.recv(1024)
+            data = ssl_sock.recv(1024)
             if not data:
                 break
-            msg = data.decode().strip()
+            msg = data.decode(errors="ignore").strip()
             sys.stdout.write(f"\r<< {msg}\n>> ")
             sys.stdout.flush()
         except OSError:
@@ -20,11 +24,14 @@ def listen_for_messages(sock: socket.socket):
 
 
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((SERVER_HOST, SERVER_PORT))
-    print(f"Connected to server at {SERVER_HOST}:{SERVER_PORT}")
+    context = ssl.create_default_context()
 
-    threading.Thread(target=listen_for_messages, args=(sock,), daemon=True).start()
+    raw_sock = socket.create_connection((SERVER_HOST, SERVER_PORT))
+    ssl_sock = context.wrap_socket(raw_sock, server_hostname=SERVER_NAME)
+
+    print(f"Connected securely to server at {SERVER_HOST}:{SERVER_PORT}")
+
+    threading.Thread(target=listen_for_messages, args=(ssl_sock,), daemon=True).start()
 
     try:
         while True:
@@ -32,16 +39,16 @@ def main():
             if not cmd:
                 continue
 
-            sock.sendall((cmd + "\n").encode())
+            ssl_sock.sendall((cmd + "\n").encode())
 
             if cmd.upper().startswith("QUIT"):
                 print("Quitting...")
                 break
     except KeyboardInterrupt:
         print("Interrupted, quitting...")
-        sock.sendall(b"QUIT |\n")
+        ssl_sock.sendall(b"QUIT |\n")
     finally:
-        sock.close()
+        ssl_sock.close()
 
 
 if __name__ == "__main__":
